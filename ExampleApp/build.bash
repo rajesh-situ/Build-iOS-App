@@ -5,7 +5,7 @@
 #!/bin/bash
 
 # Exit this script immediately if any of the commands fails
-set -e
+# set -e
 
 PROJECT_NAME=ExampleApp
 
@@ -30,6 +30,17 @@ echo ✅ Create ${BUNDLE_DIR} folder
 mkdir ${TEMP_DIR}
 echo ✅ Create ${TEMP_DIR} folder
 
+# Check for --device flag
+if [ "$1" = "--device" ]; then                            #
+  BUILDING_FOR_DEVICE=true;                               #
+fi                                                        #
+                                                          #
+# Print the current target architecture
+if [ "${BUILDING_FOR_DEVICE}" = true ]; then              #
+  echo 👍 Building ${PROJECT_NAME} for device             #
+else                                                      #
+  echo 👍 Building ${PROJECT_NAME} for simulator          #
+fi
 
 #############################################################
 echo → Step 2: Compile Swift Files
@@ -42,10 +53,28 @@ SOURCE_DIR=ExampleApp
 SWIFT_SOURCE_FILES=${SOURCE_DIR}/*.swift
 
 # Target architecture we want to build for
-TARGET=x86_64-apple-ios12-simulator
+TARGET=""
 
 # Path to the SDK we want to use for compiling
-SDK_PATH=$(xcrun --show-sdk-path --sdk iphonesimulator)
+SDK_PATH=""
+
+if [ "${BUILDING_FOR_DEVICE}" = true ]; then
+  # Building for device
+  TARGET=arm64-apple-ios12.0
+  SDK_PATH=$(xcrun --show-sdk-path --sdk iphoneos)
+
+  # The folder inside the app bundle where we
+  # will copy all required dylibs
+  FRAMEWORKS_DIR=Frameworks
+
+  # Set additional flags for the compiler
+  OTHER_FLAGS="-Xlinker -rpath -Xlinker @executable_path/${FRAMEWORKS_DIR}"
+
+else
+  # Building for simulator
+  TARGET=x86_64-apple-ios12.0-simulator
+  SDK_PATH=$(xcrun --show-sdk-path --sdk iphonesimulator)
+fi
 
 swiftc ${SWIFT_SOURCE_FILES} \
   -sdk ${SDK_PATH} \
@@ -115,6 +144,93 @@ echo ✅ Set CFBundleName to ${PROJECT_NAME}
 cp ${TEMP_INFO_PLIST} ${PROCESSED_INFO_PLIST}
 echo ✅ Copy ${TEMP_INFO_PLIST} to ${PROCESSED_INFO_PLIST}
 
-open -a "Simulator.app"
-xcrun simctl install booted ExampleApp.app
-xcrun simctl launch booted com.vojtastavik.ExampleApp
+#############################################################
+if [ "${BUILDING_FOR_DEVICE}" != true ]; then
+  # If we build for simulator, we can exit the scrip here
+  echo 🎉 Building ${PROJECT_NAME} for simulator successfully finished! 🎉
+  exit 0
+fi
+#############################################################
+
+#############################################################
+echo → Step 5: Copy Swift Runtime Libraries
+#############################################################
+
+# The folder where the Swift runtime libs live on the computer
+SWIFT_LIBS_SRC_DIR=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos
+
+# The folder inside the app bundle where we want to copy them
+SWIFT_LIBS_DEST_DIR=${BUNDLE_DIR}/${FRAMEWORKS_DIR}
+
+# The list of all libs we want to copy
+SWIFT_RUNTIME_LIBS=( libswiftCore.dylib libswiftCoreFoundation.dylib libswiftCoreGraphics.dylib libswiftCoreImage.dylib libswiftDarwin.dylib libswiftDispatch.dylib libswiftFoundation.dylib libswiftMetal.dylib libswiftObjectiveC.dylib libswiftQuartzCore.dylib libswiftSwiftOnoneSupport.dylib libswiftUIKit.dylib libswiftos.dylib )
+
+mkdir -p ${BUNDLE_DIR}/${FRAMEWORKS_DIR}
+echo ✅ Create ${SWIFT_LIBS_DEST_DIR} folder
+
+for library_name in "${SWIFT_RUNTIME_LIBS[@]}"; do
+  # Copy the library
+  cp ${SWIFT_LIBS_SRC_DIR}/$library_name ${SWIFT_LIBS_DEST_DIR}/
+  echo ✅ Copy $library_name to ${SWIFT_LIBS_DEST_DIR}
+done
+
+#############################################################
+echo → Step 6: Code Signing
+#############################################################
+
+# The name of the provisioning file to use
+# ⚠️ YOU NEED TO CHANGE THIS TO YOUR PROFILE ️️⚠️
+PROVISIONING_PROFILE_NAME=2ba33fa5-299e-4570-b4e5-840a7adae973.mobileprovision
+
+# The location of the provisioning file inside the app bundle
+EMBEDDED_PROVISIONING_PROFILE=${BUNDLE_DIR}/embedded.mobileprovision
+
+cp ~/Library/MobileDevice/Provisioning\ Profiles/${PROVISIONING_PROFILE_NAME} ${EMBEDDED_PROVISIONING_PROFILE}
+echo ✅ Copy provisioning profile ${PROVISIONING_PROFILE_NAME} to ${EMBEDDED_PROVISIONING_PROFILE}
+
+# The team identifier of your signing identity
+# ⚠️ YOU NEED TO CHANGE THIS TO YOUR ID ️️⚠️
+TEAM_IDENTIFIER=BC39BN4F76
+
+# The location if the .xcent file
+XCENT_FILE=${TEMP_DIR}/${PROJECT_NAME}.xcent
+
+# The file doesn't exist but PlistBuddy will create it automatically
+${PLIST_BUDDY} -c "Add :application-identifier string ${TEAM_IDENTIFIER}.${APP_BUNDLE_IDENTIFIER}" ${XCENT_FILE}
+${PLIST_BUDDY} -c "Add :com.apple.developer.team-identifier string ${TEAM_IDENTIFIER}" ${XCENT_FILE}
+
+echo ✅ Create ${XCENT_FILE}
+
+# The id of the identity used for signing
+IDENTITY=F0FA15DCCD82D24F381B5FD6C6134355475C7A81
+
+# Sign all libraries in the bundle
+for lib in ${SWIFT_LIBS_DEST_DIR}/*; do
+  # Sign
+  codesign \
+    --force \
+    --timestamp=none \
+    --sign ${IDENTITY} \
+    ${lib}
+  echo ✅ Codesign ${lib}
+done
+
+# Sign the bundle itself
+codesign \
+  --force \
+  --timestamp=none \
+  --sign ${IDENTITY} \
+  --entitlements ${XCENT_FILE} \
+  ${BUNDLE_DIR}
+
+
+echo ✅ Codesign ${BUNDLE_DIR}
+
+#############################################################
+echo 🎉 Building ${PROJECT_NAME} for device successfully finished! 🎉
+exit 0
+#############################################################
+
+# open -a "Simulator.app"
+# xcrun simctl install booted ExampleApp.app
+# xcrun simctl launch booted com.vojtastavik.ExampleApp
